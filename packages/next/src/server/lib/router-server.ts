@@ -1,5 +1,6 @@
 // this must come first as it includes require hooks
 import type { WorkerRequestHandler, WorkerUpgradeHandler } from './types'
+import type { UpgradeAdvisory } from '../../next-devtools/shared/upgrade-advisory'
 import type { DevBundler, ServerFields } from './router-utils/setup-dev-bundler'
 import type { NextUrlWithParsedQuery, RequestMeta } from '../request-meta'
 
@@ -190,6 +191,7 @@ export async function initialize(opts: {
       }
     | undefined = undefined
 
+  let getUpgradeAdvisory: () => UpgradeAdvisory | null = () => null
   let originalFetch = globalThis.fetch
 
   if (opts.dev) {
@@ -227,6 +229,7 @@ export async function initialize(opts: {
       getUpgradeContext(developmentConfig),
       process.env.__NEXT_VERSION || 'unknown'
     )
+    getUpgradeAdvisory = upgradeAdvisory.getSnapshot
 
     // Check only development; production startup does not query advisories.
     if (
@@ -314,6 +317,19 @@ export async function initialize(opts: {
         serverFastRefresh: effectiveServerFastRefresh,
       })
     )
+
+    let closed = false
+    opts.onDevServerCleanup?.(async () => {
+      closed = true
+    })
+    void upgradeAdvisory.assessment.then(() => {
+      if (!closed) {
+        developmentBundler.hotReloader.send({
+          type: HMR_MESSAGE_SENT_TO_BROWSER.UPGRADE_ADVISORY,
+          advisory: getUpgradeAdvisory(),
+        })
+      }
+    })
 
     let devBundlerService = new DevBundlerService(
       developmentBundler,
@@ -1077,6 +1093,12 @@ export async function initialize(opts: {
             socket,
             head,
             (client, { isLegacyClient }) => {
+              client.send(
+                JSON.stringify({
+                  type: HMR_MESSAGE_SENT_TO_BROWSER.UPGRADE_ADVISORY,
+                  advisory: getUpgradeAdvisory(),
+                })
+              )
               if (isLegacyClient) {
                 // Only send the ISR manifest to legacy clients, i.e. Pages
                 // Router clients, or App Router clients that have Cache
