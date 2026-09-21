@@ -85,6 +85,74 @@ export function ErrorOverlayLayout({
   rendered = true,
   transitionDurationMs,
 }: ErrorOverlayLayoutProps) {
+  return (
+    <OverlayLayout
+      rendered={rendered}
+      transitionDurationMs={transitionDurationMs}
+      onClose={onClose}
+      isBuildError={isBuildError}
+      dialogResizerRef={dialogResizerRef}
+      navigation={
+        <ErrorOverlayNav
+          runtimeErrors={runtimeErrors}
+          activeIdx={activeIdx}
+          setActiveIndex={setActiveIndex}
+          canGoPrevious={canGoPrevious}
+          canGoNext={canGoNext}
+          onPrevious={onPrevious}
+          onNext={onNext}
+          versionInfo={versionInfo}
+          renderTabBar={renderTabBar}
+        />
+      }
+      header={
+        <>
+          <div className="nextjs__container_errors__error_title">
+            <div className="nextjs__container_errors__error_title__row">
+              <span data-nextjs-error-label-group>
+                <ErrorTypeLabel errorType={errorType} />
+                {error.environmentName && (
+                  <EnvironmentNameLabel
+                    environmentName={error.environmentName}
+                  />
+                )}
+              </span>
+              <ErrorOverlayToolbar
+                error={error}
+                debugInfo={debugInfo}
+                generateErrorInfo={generateErrorInfo}
+              />
+            </div>
+            <ErrorMessage errorMessage={errorMessage} errorType={errorType} />
+          </div>
+          {headerChildren}
+        </>
+      }
+    >
+      {children}
+    </OverlayLayout>
+  )
+}
+
+export function OverlayLayout({
+  navigation,
+  header,
+  children,
+  rendered,
+  transitionDurationMs,
+  onClose,
+  isBuildError,
+  dialogResizerRef,
+}: {
+  navigation: React.ReactNode
+  header: React.ReactNode
+  children: React.ReactNode
+  rendered: boolean
+  transitionDurationMs: number | undefined
+  onClose: (() => void) | undefined
+  isBuildError: boolean | undefined
+  dialogResizerRef: React.RefObject<HTMLDivElement | null> | undefined
+}) {
   const animationProps = {
     'data-rendered': rendered,
     style: {
@@ -117,17 +185,7 @@ export function ErrorOverlayLayout({
         ref={dialogRef}
         {...animationProps}
       >
-        <ErrorOverlayNav
-          runtimeErrors={runtimeErrors}
-          activeIdx={activeIdx}
-          setActiveIndex={setActiveIndex}
-          canGoPrevious={canGoPrevious}
-          canGoNext={canGoNext}
-          onPrevious={onPrevious}
-          onNext={onNext}
-          versionInfo={versionInfo}
-          renderTabBar={renderTabBar}
-        />
+        {navigation}
         <ErrorOverlayDialog onClose={onClose}>
           <Resizer
             ref={dialogResizerRef}
@@ -135,30 +193,7 @@ export function ErrorOverlayLayout({
             data-nextjs-dialog-sizer
           >
             <DialogContent>
-              <ErrorOverlayDialogHeader>
-                <div className="nextjs__container_errors__error_title">
-                  <div className="nextjs__container_errors__error_title__row">
-                    <span data-nextjs-error-label-group>
-                      <ErrorTypeLabel errorType={errorType} />
-                      {error.environmentName && (
-                        <EnvironmentNameLabel
-                          environmentName={error.environmentName}
-                        />
-                      )}
-                    </span>
-                    <ErrorOverlayToolbar
-                      error={error}
-                      debugInfo={debugInfo}
-                      generateErrorInfo={generateErrorInfo}
-                    />
-                  </div>
-                  <ErrorMessage
-                    errorMessage={errorMessage}
-                    errorType={errorType}
-                  />
-                </div>
-                {headerChildren}
-              </ErrorOverlayDialogHeader>
+              <ErrorOverlayDialogHeader>{header}</ErrorOverlayDialogHeader>
               <ErrorOverlayDialogBody>{children}</ErrorOverlayDialogBody>
             </DialogContent>
           </Resizer>

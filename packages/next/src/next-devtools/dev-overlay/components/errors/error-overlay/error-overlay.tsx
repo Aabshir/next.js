@@ -60,8 +60,8 @@ export function ErrorOverlay({
     )
   }
 
-  // No Runtime Errors.
-  if (!runtimeErrors.length) {
+  // No runtime errors or upgrade advisory to display.
+  if (!runtimeErrors.length && !state.upgradeAdvisory) {
     return null
   }
 
@@ -70,9 +70,9 @@ export function ErrorOverlay({
   const hasNormal = runtimeErrors.some(
     (e) => !isInstantNavigationError(e.error)
   )
-  const hasInstant = runtimeErrors.some((e) =>
-    isInstantNavigationError(e.error)
-  )
+  const hasInstant =
+    state.upgradeAdvisory !== null ||
+    runtimeErrors.some((e) => isInstantNavigationError(e.error))
   const tabKey = `${hasNormal ? 'n' : ''}${hasInstant ? 'i' : ''}`
 
   return (
@@ -83,6 +83,7 @@ export function ErrorOverlay({
         debugInfo={state.debugInfo}
         getSquashedHydrationErrorDetails={getSquashedHydrationErrorDetails}
         runtimeErrors={runtimeErrors}
+        advisory={state.upgradeAdvisory}
         onClose={() => {
           dispatch({ type: ACTION_ERROR_OVERLAY_CLOSE })
         }}
