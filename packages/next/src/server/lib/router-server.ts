@@ -218,6 +218,16 @@ export async function initialize(opts: {
     // In development, it's always the complete config.
     let developmentConfig = config as NextConfigComplete
 
+    const { nudgeUpgrade, getUpgradeContext } =
+      require('../../lib/upgrade/nudge') as typeof import('../../lib/upgrade/nudge')
+    const { createUpgradeAdvisory } =
+      require('../../lib/upgrade/dev-advisory') as typeof import('../../lib/upgrade/dev-advisory')
+    const upgradeAdvisory = createUpgradeAdvisory(
+      opts.dir,
+      getUpgradeContext(developmentConfig),
+      process.env.__NEXT_VERSION || 'unknown'
+    )
+
     // Check only development; production startup does not query advisories.
     if (
       developmentConfig.experimental.agenticAutoUpgrade === 'security' ||
@@ -225,8 +235,6 @@ export async function initialize(opts: {
       developmentConfig.experimental.agenticAutoUpgrade === 'future' ||
       process.env.__NEXT_AGENTIC_AUTO_UPGRADE
     ) {
-      const { nudgeUpgrade, getUpgradeContext } =
-        require('../../lib/upgrade/nudge') as typeof import('../../lib/upgrade/nudge')
       if (process.env.NEXT_PRIVATE_UPGRADE_PROMPT === '1' && process.send) {
         // TODO: Do not block dev startup while prompting for an upgrade.
         // Preserve all logs for display after the prompt and stop dev before Update.
@@ -246,7 +254,13 @@ export async function initialize(opts: {
           })
         })
       } else {
-        void nudgeUpgrade(opts.dir, developmentConfig, 'dev').catch((error) => {
+        void nudgeUpgrade(
+          opts.dir,
+          developmentConfig,
+          'dev',
+          null,
+          upgradeAdvisory.assessment
+        ).catch((error) => {
           const { printAndExit } =
             require('./utils') as typeof import('./utils')
           const exitCode =

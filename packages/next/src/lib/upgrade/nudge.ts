@@ -459,7 +459,8 @@ export async function nudgeUpgrade(
   directory: string,
   config: UpgradeContext,
   command: 'dev' | 'build',
-  signal: AbortSignal | null = null
+  signal: AbortSignal | null = null,
+  upgradeAssessment: ReturnType<typeof assessUpgrade> | undefined = undefined
 ): Promise<UpgradeAction | void> {
   const requested = getRequestedUpgrade()
   const policy = requested ?? config.experimental.agenticAutoUpgrade
@@ -490,13 +491,14 @@ export async function nudgeUpgrade(
       return
     }
   }
-  let reminder = await assessUpgrade(
-    directory,
-    { ...config, experimental: { agenticAutoUpgrade: policy } },
-    installedVersion,
-    stopBefore,
-    requested !== null
-  )
+  let reminder = await (upgradeAssessment ??
+    assessUpgrade(
+      directory,
+      { ...config, experimental: { agenticAutoUpgrade: policy } },
+      installedVersion,
+      stopBefore,
+      requested !== null
+    ))
   const preview = !reminder && requested !== null
   if (preview) {
     // Exercise the real template without inventing an advisory or release.
