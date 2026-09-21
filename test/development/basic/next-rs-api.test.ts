@@ -163,7 +163,7 @@ async function main() {
   const bindings = await loadBindings();
   const rootPath = __dirname;
   const distDir = '.next';
-  const project = await bindings.turbo.createProject({
+  const projectResult = await bindings.turbo.createProject({
     env: {},
     nextConfig: nextConfig,
     rootPath,
@@ -205,6 +205,12 @@ async function main() {
   }, {
     turbopackMemoryEviction: 'off',
   });
+  if (projectResult.issues.length > 0) {
+    throw new Error(
+      \`Project initialization failed: \${JSON.stringify(projectResult.issues)}\`
+    );
+  }
+  const project = projectResult.value;
 
   const entrypointsSubscription = project.entrypointsSubscribe();
   const entrypoints = (await entrypointsSubscription.next()).value.value;
@@ -317,7 +323,7 @@ describe('next.rs api', () => {
       ? path.resolve(__dirname, '../../..')
       : next.testDir
     const distDir = '.next'
-    project = await bindings.turbo.createProject(
+    const projectResult = await bindings.turbo.createProject(
       {
         env: {},
         nextConfig: nextConfig,
@@ -362,6 +368,13 @@ describe('next.rs api', () => {
         turbopackMemoryEviction: 'off' as MemoryEvictionMode,
       }
     )
+    const initializationIssues = normalizeIssues(projectResult.issues)
+    if (initializationIssues.length > 0) {
+      throw new Error(
+        `Project initialization failed:\n${JSON.stringify(initializationIssues, null, 2)}`
+      )
+    }
+    project = projectResult.value
     projectUpdateSubscription = filterMapAsyncIterator(
       project.updateInfoSubscribe(1000),
       (update) => (update.updateType === 'end' ? update.value : undefined)
