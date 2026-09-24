@@ -385,7 +385,10 @@ describe('agent upgrade prompt', () => {
           : resolveFrom(next.testDir, 'next/dist/bin/next')
         const pty = createRequire(nextBin)('node-pty')
         const port = await findPort()
-        const env = { ...process.env, __NEXT_AGENTIC_AUTO_UPGRADE: 'future' }
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          __NEXT_AGENTIC_AUTO_UPGRADE: 'future',
+        }
         delete env.AI_AGENT
         delete env.CODEX_SANDBOX
         delete env.CODEX_CI
