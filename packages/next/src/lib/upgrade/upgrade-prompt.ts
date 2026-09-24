@@ -37,28 +37,45 @@ export async function runDevWithUpgradePrompt(
   // runs later so it cannot delay dev startup; config supplies the policy.
   // Import after the guard so the PTY child skips upgrade module initialization
   // when it re-enters this CLI to run ordinary dev.
-  const {
-    shouldPromptForUpgrade,
-    getUpgradeContext,
-    nudgeUpgrade,
-    runUpgrade,
-  } = await import('./nudge.js')
-  if (!(await shouldPromptForUpgrade())) {
+  // Config loading reads .env into this process. Keep the original environment
+  // so the child can reload .env values when the file changes.
+  const childEnv = { ...process.env }
+  // Preflight must never replace ordinary dev's config error path. Let nextDev
+  // load and report an invalid config in the usual way.
+  let preflight: {
+    dir: string
+    context: ReturnType<(typeof import('./nudge.js'))['getUpgradeContext']>
+    nudgeUpgrade: (typeof import('./nudge.js'))['nudgeUpgrade']
+    runUpgrade: (typeof import('./nudge.js'))['runUpgrade']
+  }
+  try {
+    const {
+      shouldPromptForUpgrade,
+      getUpgradeContext,
+      nudgeUpgrade,
+      runUpgrade,
+    } = await import('./nudge.js')
+    if (!(await shouldPromptForUpgrade())) {
+      return false
+    }
+    const dir = getProjectDir(directory)
+    const loadConfig = (
+      require('../../server/config') as typeof import('../../server/config')
+    ).default
+    // TODO: Reuse this config in dev rather than loading it again in the child.
+    const config = await loadConfig(PHASE_DEVELOPMENT_SERVER, dir, {
+      silent: true,
+    })
+    preflight = {
+      dir,
+      context: getUpgradeContext(config),
+      nudgeUpgrade,
+      runUpgrade,
+    }
+  } catch {
     return false
   }
-
-  const dir = getProjectDir(directory)
-  // Config loading reads .env into this process. The dev child must inherit the
-  // original environment so its own .env reloads still work.
-  const childEnv = { ...process.env }
-  const loadConfig = (
-    require('../../server/config') as typeof import('../../server/config')
-  ).default
-  // TODO: Reuse this config in dev rather than loading it again in the child.
-  const config = await loadConfig(PHASE_DEVELOPMENT_SERVER, dir, {
-    silent: true,
-  })
-  const context = getUpgradeContext(config)
+  const { dir, context, nudgeUpgrade, runUpgrade } = preflight
   if (!context.experimental.agenticAutoUpgrade) {
     return false
   }
