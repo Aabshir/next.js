@@ -193,7 +193,6 @@ import {
   consumeDynamicAccess,
   type DynamicAccess,
   logDisallowedDynamicError,
-  trackDynamicHoleInRuntimeShell,
   trackDynamicHoleInStaticShell,
   getStaticShellDisallowedDynamicReasons,
   getNavigationDisallowedDynamicReasons,
@@ -203,6 +202,10 @@ import {
   createInstantValidationState,
   type NavigationValidationResult,
   throwIfSyncIOUsed,
+  trackDynamicAccessInStaticRoute,
+  throwIfDisallowedDynamicInStaticRoute,
+  geteDisallowedReasonsInStaticRoute,
+  type InstantValidationHoleKind,
 } from './dynamic-rendering'
 import { logBuildDebugHint } from './blocking-route-messages'
 import {
@@ -361,6 +364,7 @@ import type {
   StageEndTimes,
   ValidationPrefetchKind,
 } from './instant-validation/instant-validation'
+import type { NonPartial } from '../../shared/lib/typescript-utils'
 
 export type GetDynamicParamFromSegment = (
   // The LoaderTree to extract the dynamic param from
@@ -6765,7 +6769,9 @@ export type ValidationRenderContext = Pick<
   | 'nonce'
   | 'workStore'
 > & {
-  renderOpts: Pick<RenderOpts, 'images' | 'allowEmptyStaticShell'>
+  renderOpts: NonPartial<
+    Pick<RenderOpts, 'images' | 'allowEmptyStaticShell' | 'partialPrefetching'>
+  >
   reactBrowserBailout: boolean
   isDebugChannelEnabled: boolean
 }
@@ -6789,6 +6795,7 @@ export function toValidationRenderContext(
     renderOpts: {
       images: ctx.renderOpts.images,
       allowEmptyStaticShell: ctx.renderOpts.allowEmptyStaticShell,
+      partialPrefetching: ctx.renderOpts.partialPrefetching,
     },
     reactBrowserBailout: ctx.renderOpts.experimental.reactBrowserBailout,
     isDebugChannelEnabled: !!ctx.renderOpts.setReactDebugChannel,
@@ -6917,6 +6924,7 @@ export async function runValidationInDevFromSnapshot(
     renderOpts: {
       images: message.renderOpts.images,
       allowEmptyStaticShell: message.renderOpts.allowEmptyStaticShell,
+      partialPrefetching: message.renderOpts.partialPrefetching,
     },
     reactBrowserBailout: message.reactBrowserBailout,
     isDebugChannelEnabled: message.isDebugChannelEnabled,
@@ -7153,17 +7161,23 @@ async function validateStaticShell(
     (renderOpts.allowEmptyStaticShell ?? false) ||
     (await isPageAllowedToBlock(loaderTree))
 
-  const runtimeResult = await validateStagedShell(
-    accumulatedChunks[RenderStage.Runtime],
-    accumulatedChunks[RenderStage.Dynamic],
+  const prefetchMode = await getPrefetchingModeForPage(renderOpts, loaderTree)
+  const ensureStaticLevel = await resolveEnsureStaticLevel(
+    loaderTree,
+    prefetchMode === PrefetchingMode.Partial
+  )
+
+  const runtimeResult = await validateStaticShellAtStage(
+    RenderStage.Runtime,
+    accumulatedChunks,
     debugChunks,
-    stageEndTimes[RenderStage.Runtime],
+    stageEndTimes,
     rootParams,
     fallbackRouteParams,
+    ensureStaticLevel,
     allowEmptyStaticShell,
     ctx,
     hmrRefreshHash,
-    trackDynamicHoleInRuntimeShell,
     validationAbortSignal
   )
 
@@ -7178,17 +7192,17 @@ async function validateStaticShell(
     return []
   }
 
-  const staticResult = await validateStagedShell(
-    accumulatedChunks[RenderStage.Static],
-    accumulatedChunks[RenderStage.Dynamic],
+  const staticResult = await validateStaticShellAtStage(
+    RenderStage.Static,
+    accumulatedChunks,
     debugChunks,
-    stageEndTimes[RenderStage.Static],
+    stageEndTimes,
     rootParams,
     fallbackRouteParams,
+    ensureStaticLevel,
     allowEmptyStaticShell,
     ctx,
     hmrRefreshHash,
-    trackDynamicHoleInStaticShell,
     validationAbortSignal
   )
 
@@ -7380,22 +7394,32 @@ async function warmupClientModulesForStagedValidation(
   )
 }
 
-async function validateStagedShell(
-  stageChunks: Array<Uint8Array>,
-  allServerChunks: Array<Uint8Array>,
+async function validateStaticShellAtStage(
+  stage: RenderStage.Static | RenderStage.Runtime,
+  accumulatedChunks: AccumulatedStreamChunks,
   debugChunks: null | Array<Uint8Array>,
-  debugEndTime: number | undefined,
+  stageEndTimes: StageEndTimes,
   rootParams: Params,
   fallbackRouteParams: OpaqueFallbackRouteParams | null,
+  ensureStaticLevel: EnsureStaticLevel,
   allowEmptyStaticShell: boolean,
   ctx: ValidationRenderContext,
   hmrRefreshHash: string | undefined,
-  trackDynamicHole:
-    | typeof trackDynamicHoleInStaticShell
-    | typeof trackDynamicHoleInRuntimeShell,
   validationAbortSignal: AbortSignal
 ): Promise<Array<unknown>> {
+  const debug =
+    process.env.NEXT_PRIVATE_DEBUG_VALIDATION === '1' ? console.log : undefined
+
   const { implicitTags, nonce, workStore } = ctx
+
+  const dynamicHoleKind =
+    stage === RenderStage.Static
+      ? DynamicHoleKind.Runtime
+      : DynamicHoleKind.Dynamic
+
+  const stageIsPartial =
+    accumulatedChunks[stage].length <
+    accumulatedChunks[RenderStage.Dynamic].length
 
   const clientDynamicTracking = createDynamicTrackingState(
     false //isDebugDynamicAccesses
@@ -7435,8 +7459,8 @@ async function validateStagedShell(
   const dynamicValidation = createDynamicValidationState()
 
   const serverStream = createNodeStreamWithLateRelease(
-    stageChunks,
-    allServerChunks,
+    accumulatedChunks[stage],
+    accumulatedChunks[RenderStage.Dynamic],
     clientReactSignal
   )
 
@@ -7448,6 +7472,10 @@ async function validateStagedShell(
       )
     : undefined
 
+  debug?.(
+    `Validating static shell at: ${RenderStage[stage]} (partial: ${stageIsPartial}, static level: ${EnsureStaticLevel[ensureStaticLevel]})`
+  )
+
   try {
     let { prelude: unprocessedPrelude } = await runInSequentialTasks(
       () => {
@@ -7458,7 +7486,7 @@ async function validateStagedShell(
           <App
             reactServerStream={serverStream}
             reactDebugStream={debugChannelClient}
-            debugEndTime={debugEndTime}
+            debugEndTime={stageEndTimes[stage]}
             preinitScripts={preinitScripts}
             ServerInsertedHTMLProvider={ServerInsertedHTMLProvider}
             nonce={nonce}
@@ -7473,13 +7501,26 @@ async function validateStagedShell(
               ) {
                 const componentStack = errorInfo.componentStack
                 if (typeof componentStack === 'string') {
-                  trackDynamicHole(
-                    err,
-                    workStore,
-                    componentStack,
-                    dynamicValidation,
-                    clientDynamicTracking
-                  )
+                  if (ensureStaticLevel === EnsureStaticLevel.Navigation) {
+                    trackDynamicAccessInStaticRoute(
+                      err,
+                      workStore,
+                      componentStack,
+                      dynamicValidation,
+                      clientDynamicTracking,
+                      stageIsPartial,
+                      dynamicHoleKind
+                    )
+                  } else {
+                    trackDynamicHoleInStaticShell(
+                      err,
+                      workStore,
+                      componentStack,
+                      dynamicValidation,
+                      clientDynamicTracking,
+                      dynamicHoleKind
+                    )
+                  }
                 }
                 return
               }
@@ -7519,21 +7560,46 @@ async function validateStagedShell(
     )
 
     const { preludeIsEmpty } = await processPreludeOp(unprocessedPrelude)
-    return getStaticShellDisallowedDynamicReasons(
-      workStore,
-      preludeIsEmpty ? PreludeState.Empty : PreludeState.Full,
-      dynamicValidation,
-      allowEmptyStaticShell
-    )
+    const preludeState = preludeIsEmpty ? PreludeState.Empty : PreludeState.Full
+    if (ensureStaticLevel === EnsureStaticLevel.Navigation) {
+      return geteDisallowedReasonsInStaticRoute(
+        workStore,
+        preludeState,
+        dynamicValidation,
+        null,
+        allowEmptyStaticShell,
+        stageIsPartial
+      )
+    } else {
+      return getStaticShellDisallowedDynamicReasons(
+        workStore,
+        preludeState,
+        dynamicValidation,
+        allowEmptyStaticShell
+      )
+    }
   } catch (thrownValue) {
     // Even if the root errors we still want to report any cache components errors
     // that were discovered before the root errored.
-    let errors: Array<unknown> = getStaticShellDisallowedDynamicReasons(
-      workStore,
-      PreludeState.Errored,
-      dynamicValidation,
-      allowEmptyStaticShell
-    )
+    const preludeState = PreludeState.Errored
+    let errors: Array<unknown>
+    if (ensureStaticLevel === EnsureStaticLevel.Navigation) {
+      errors = geteDisallowedReasonsInStaticRoute(
+        workStore,
+        preludeState,
+        dynamicValidation,
+        null,
+        allowEmptyStaticShell,
+        stageIsPartial
+      )
+    } else {
+      errors = getStaticShellDisallowedDynamicReasons(
+        workStore,
+        preludeState,
+        dynamicValidation,
+        allowEmptyStaticShell
+      )
+    }
 
     if (process.env.NEXT_DEBUG_BUILD || process.env.__NEXT_VERBOSE_LOGGING) {
       errors.unshift(
@@ -7635,7 +7701,7 @@ async function validateInstantConfigs(
     holeResolution: Partial<
       Record<
         PrefetchedSegmentStage | RenderStage.Dynamic,
-        DynamicHoleKind | null
+        InstantValidationHoleKind | null
       >
     >
   }
@@ -7648,7 +7714,7 @@ async function validateInstantConfigs(
     TStages extends [...PrefetchedSegmentStage[], RenderStage.Dynamic],
   >(sequence: {
     stageOrder: TStages
-    holeResolution: Record<TStages[number], DynamicHoleKind | null>
+    holeResolution: Record<TStages[number], InstantValidationHoleKind | null>
   }): ValidationSequence => {
     return sequence
   }
@@ -7714,7 +7780,7 @@ async function validateInstantConfigs(
 
   function getDynamicHoleKindForSegmentStage(
     stage: PrefetchedSegmentStage
-  ): DynamicHoleKind {
+  ): InstantValidationHoleKind {
     // We report holes in reverse order, i.e. holes in Stage N are only reported
     // if Stage N+1 didn't have any holes. That means that if we report a hole from Stage N,
     // it has to be caused by data that would've resolved in Stage N+1.
@@ -9747,6 +9813,20 @@ async function prerenderToStream(
       // normally, we can at least get the outer object with hanging promises inside.
       throwIfSyncIOUsed(workStore, serverDynamicTracking)
 
+      let hasNonPrerenderableData = false
+      if (
+        ensureStaticLevel === EnsureStaticLevel.Navigation &&
+        resultIsPartial &&
+        // Exclude upgradeable fallbacks, which are partial.
+        !(
+          fallbackRouteParams &&
+          fallbackRouteParams.size > 0 &&
+          finalServerPrerenderStore.isFallbackUpgradeable
+        )
+      ) {
+        hasNonPrerenderableData = true
+      }
+
       const reactServerResult = (reactServerPrerenderResult =
         new ReactServerPrerenderResult(collectedChunks.prerenderChunks))
       reactServerPrerenderResultIsDynamic = resultIsPartial
@@ -9814,6 +9894,9 @@ async function prerenderToStream(
         varyParamsAccumulator: null,
       }
 
+      // In a static prerender, we don't know which kind of data caused a dynamic hole.
+      const dynamicHoleKind = DynamicHoleKind.RuntimeOrDynamic
+
       let dynamicValidation = createDynamicValidationState()
 
       const finalClientOnHeaders = createOnHeadersCallback(appendHeader)
@@ -9855,13 +9938,25 @@ async function prerenderToStream(
                       errorInfo as any
                     ).componentStack
                     if (typeof componentStack === 'string') {
-                      trackAllowedDynamicAccess(
-                        err,
-                        workStore,
-                        componentStack,
-                        dynamicValidation,
-                        clientDynamicTracking
-                      )
+                      if (ensureStaticLevel === EnsureStaticLevel.Navigation) {
+                        trackDynamicAccessInStaticRoute(
+                          err,
+                          workStore,
+                          componentStack,
+                          dynamicValidation,
+                          clientDynamicTracking,
+                          hasNonPrerenderableData,
+                          dynamicHoleKind
+                        )
+                      } else {
+                        trackAllowedDynamicAccess(
+                          err,
+                          workStore,
+                          componentStack,
+                          dynamicValidation,
+                          clientDynamicTracking
+                        )
+                      }
                     }
                     return
                   }
@@ -9901,13 +9996,25 @@ async function prerenderToStream(
       const { prelude, preludeIsEmpty } =
         await processPreludeOp(unprocessedPrelude)
 
-      throwIfDisallowedDynamic(
-        workStore,
-        preludeIsEmpty ? PreludeState.Empty : PreludeState.Full,
-        dynamicValidation,
-        serverDynamicTracking,
-        allowEmptyStaticShell
-      )
+      // console.log('dynamicValidation', workStore.route, dynamicValidation)
+      if (ensureStaticLevel === EnsureStaticLevel.Navigation) {
+        throwIfDisallowedDynamicInStaticRoute(
+          workStore,
+          preludeIsEmpty ? PreludeState.Empty : PreludeState.Full,
+          dynamicValidation,
+          serverDynamicTracking,
+          allowEmptyStaticShell,
+          hasNonPrerenderableData
+        )
+      } else {
+        throwIfDisallowedDynamic(
+          workStore,
+          preludeIsEmpty ? PreludeState.Empty : PreludeState.Full,
+          dynamicValidation,
+          serverDynamicTracking,
+          allowEmptyStaticShell
+        )
+      }
 
       const getServerInsertedHTML = makeGetServerInsertedHTML({
         polyfills,
@@ -9917,6 +10024,10 @@ async function prerenderToStream(
         tracingMetadata: tracingMetadata,
       })
 
+      // console.log('prerenderToStream', workStore.route, {
+      //   resultIsPartial,
+      //   'postponed != null': postponed != null,
+      // })
       let htmlStream: AnyStream = prelude
       if (resultIsPartial) {
         if (postponed != null) {
