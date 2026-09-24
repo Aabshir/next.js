@@ -140,10 +140,21 @@ export async function runDevWithUpgradePrompt(
   let captureError: unknown = null
   const promptController = new AbortController()
   let terminationSignal: 'SIGTERM' | 'SIGHUP' | null = null
+  let waitingForDrain = false
+  const onDrain = () => {
+    waitingForDrain = false
+    if (outputMode === 'live') {
+      terminal.resume()
+    }
+  }
   const onData = terminal.onData((data) => {
     const bytes = Buffer.from(data)
     if (outputMode === 'live') {
-      process.stdout.write(bytes)
+      if (!process.stdout.write(bytes) && !waitingForDrain) {
+        waitingForDrain = true
+        terminal.pause()
+        process.stdout.once('drain', onDrain)
+      }
     } else if (outputMode === 'replay') {
       pending.push(bytes)
     } else {
@@ -211,6 +222,7 @@ export async function runDevWithUpgradePrompt(
     process.off('SIGTERM', onTerminate)
     process.off('SIGHUP', onHangup)
     process.stdout.off('resize', onResize)
+    process.stdout.off('drain', onDrain)
     onData.dispose()
     closeCapture()
   }
@@ -270,6 +282,16 @@ export async function runDevWithUpgradePrompt(
   // After a non-upgrade choice or prompt failure, restore captured output
   // before forwarding new output. Chunks arriving during replay go into pending.
   outputMode = 'replay'
+  // Stop PTY reads while replaying so pending output remains bounded and every
+  // byte reaches stdout in the same order, even when its reader is slow.
+  terminal.pause()
+  const writeOutput = async (bytes: Buffer) => {
+    if (!process.stdout.write(bytes)) {
+      await new Promise<void>((resolve) =>
+        process.stdout.once('drain', resolve)
+      )
+    }
+  }
   const buffer = Buffer.allocUnsafe(64 * 1024)
   let position = 0
   while (position < capturedBytes) {
@@ -283,14 +305,15 @@ export async function runDevWithUpgradePrompt(
     if (length === 0) {
       break
     }
-    process.stdout.write(buffer.subarray(0, length))
+    await writeOutput(buffer.subarray(0, length))
     position += length
   }
   for (const data of pending) {
-    process.stdout.write(data)
+    await writeOutput(data)
   }
   pending.length = 0
   outputMode = 'live'
+  terminal.resume()
   closeCapture()
 
   // Respect a menu interrupt, or return the child's exit status if dev already
