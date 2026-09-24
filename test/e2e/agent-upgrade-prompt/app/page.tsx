@@ -23,7 +23,8 @@ async function RequestContent({
 }) {
   await connection()
 
-  if ((await searchParams).hold === '1') {
+  const params = await searchParams
+  if (params.hold === '1') {
     // Keep Next's real shutdown cleanup pending until the test releases it.
     after(
       () =>
@@ -37,6 +38,12 @@ async function RequestContent({
           })
           writeFileSync(join(process.cwd(), `upgrade-ready-${process.pid}`), '')
         })
+    )
+  }
+  if (params.flood === '1') {
+    // Fill the outer terminal's buffer during replay to exercise backpressure.
+    console.log(
+      `UPGRADE_FLOOD_BEGIN${'x'.repeat(1024 * 1024)}UPGRADE_FLOOD_END`
     )
   }
   console.log('UPGRADE_REQUEST_LOG')

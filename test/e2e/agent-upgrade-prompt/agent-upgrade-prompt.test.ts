@@ -26,10 +26,9 @@ describe('agent upgrade prompt', () => {
       mode: 'normal' | 'prompt' = 'prompt',
       waitForShutdown: boolean = false
     ) {
-      const nextBin = resolveFrom(
-        process.env.NEXT_SKIP_ISOLATE ? process.cwd() : next.testDir,
-        'next/dist/bin/next'
-      )
+      const nextBin = process.env.NEXT_SKIP_ISOLATE
+        ? join(process.cwd(), 'packages/next/dist/bin/next')
+        : resolveFrom(next.testDir, 'next/dist/bin/next')
       const pty = createRequire(nextBin)('node-pty')
       const port = await findPort()
       const env = { ...process.env }
@@ -67,11 +66,13 @@ describe('agent upgrade prompt', () => {
       )
       let output = ''
       let exited = false
+      let exitCode: number | undefined
       terminal.onData((data: string) => {
         output += data
       })
-      terminal.onExit(() => {
+      terminal.onExit(({ exitCode: code }) => {
         exited = true
+        exitCode = code
       })
 
       return {
@@ -82,6 +83,9 @@ describe('agent upgrade prompt', () => {
         },
         get exited() {
           return exited
+        },
+        get exitCode() {
+          return exitCode
         },
         async stop(skipPrompt: boolean = true) {
           if (!exited) {
@@ -267,6 +271,200 @@ describe('agent upgrade prompt', () => {
         await dev.stop()
       }
     })
+
+    it('lets ordinary dev report an invalid config after prompt preflight fails', async () => {
+      await next.patchFile(
+        'next.config.js',
+        'throw new Error("INVALID_CONFIG_TEST")\n',
+        async () => {
+          const dev = await startDev()
+          try {
+            await retry(async () => {
+              expect(dev.output).toContain('INVALID_CONFIG_TEST')
+              expect(dev.exited).toBe(true)
+            }, 10_000)
+            expect(dev.output).not.toContain('Upgrade now')
+            expect(dev.exitCode).toBeGreaterThan(0)
+          } finally {
+            await dev.stop(false)
+          }
+        }
+      )
+    })
+
+    it('returns 130 when Ctrl+C interrupts the upgrade menu', async () => {
+      const dev = await startDev()
+      try {
+        await retry(async () => {
+          expect(dev.output).toContain('Upgrade now')
+        }, 10_000)
+        dev.terminal.write('\x03')
+        await retry(async () => {
+          expect(dev.exited).toBe(true)
+        }, 10_000)
+        expect(dev.exitCode).toBe(130)
+      } finally {
+        await dev.stop(false)
+      }
+    })
+
+    it('replays large captured logs with a slow terminal reader', async () => {
+      const dev = await startDev()
+      try {
+        await retry(async () => {
+          expect(dev.output).toContain('Upgrade now')
+        }, 10_000)
+        const response = await retry(
+          () => fetch(`http://127.0.0.1:${dev.port}/?flood=1`),
+          10_000
+        )
+        expect(response.status).toBe(200)
+        expect(dev.output).not.toContain('UPGRADE_FLOOD_BEGIN')
+
+        // Stop reading the outer PTY before Skip. Replay must wait for stdout
+        // to drain, then deliver the entire saved log in order.
+        dev.terminal.pause()
+        dev.terminal.write('\x1b[B\r')
+        const second = await fetch(`http://127.0.0.1:${dev.port}/`)
+        expect(second.status).toBe(200)
+        dev.terminal.resume()
+
+        await retry(async () => {
+          expect(dev.output).toContain('UPGRADE_FLOOD_END')
+        }, 10_000)
+        expect(dev.output).toContain(
+          `UPGRADE_FLOOD_BEGIN${'x'.repeat(1024 * 1024)}UPGRADE_FLOOD_END`
+        )
+        expect(dev.output.match(/UPGRADE_FLOOD_BEGIN/g)).toHaveLength(1)
+      } finally {
+        dev.terminal.resume()
+        await dev.stop()
+      }
+    })
+
+    if (process.platform !== 'win32') {
+      it('returns the signal status when the PTY child is killed', async () => {
+        const dev = await startDev()
+        let devPid = 0
+        let serverPid = 0
+        try {
+          await retry(async () => {
+            expect(dev.output).toContain('Upgrade now')
+          }, 10_000)
+          const response = await retry(
+            () => fetch(`http://127.0.0.1:${dev.port}/`),
+            10_000
+          )
+          const body = await response.text()
+          devPid = Number(body.match(/data-dev-pid="(\d+)"/)?.[1])
+          serverPid = Number(body.match(/data-server-pid="(\d+)"/)?.[1])
+          expect(devPid).toBeGreaterThan(0)
+
+          dev.terminal.write('\x1b[B\r')
+          await retry(async () => {
+            expect(dev.output).toContain('UPGRADE_REQUEST_LOG')
+          })
+          process.kill(devPid, 'SIGKILL')
+          await retry(async () => {
+            expect(dev.exited).toBe(true)
+          }, 10_000)
+          expect(dev.exitCode).toBe(137)
+        } finally {
+          await dev.stop(false)
+          if (serverPid) {
+            try {
+              process.kill(serverPid, 'SIGKILL')
+            } catch {}
+          }
+        }
+      })
+
+      it('returns to the shell on Ctrl+Z and resumes dev with fg', async () => {
+        const nextBin = process.env.NEXT_SKIP_ISOLATE
+          ? join(process.cwd(), 'packages/next/dist/bin/next')
+          : resolveFrom(next.testDir, 'next/dist/bin/next')
+        const pty = createRequire(nextBin)('node-pty')
+        const port = await findPort()
+        const env = { ...process.env, __NEXT_AGENTIC_AUTO_UPGRADE: 'future' }
+        delete env.AI_AGENT
+        delete env.CODEX_SANDBOX
+        delete env.CODEX_CI
+        delete env.CODEX_THREAD_ID
+        env.PS1 = 'UPGRADE_SHELL> '
+        const shell = pty.spawn('/bin/bash', ['--noprofile', '--norc', '-i'], {
+          cwd: next.testDir,
+          env,
+          name: 'xterm-256color',
+          cols: 100,
+          rows: 30,
+        })
+        let output = ''
+        let exited = false
+        shell.onData((data: string) => {
+          output += data
+        })
+        shell.onExit(() => {
+          exited = true
+        })
+        const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
+
+        try {
+          await retry(async () => {
+            expect(output).toContain('UPGRADE_SHELL>')
+          })
+          shell.write(
+            `${quote(process.execPath)} ${quote(nextBin)} dev -p ${port} -H 127.0.0.1\r`
+          )
+          await retry(async () => {
+            expect(output).toContain('Upgrade now')
+          }, 10_000)
+          shell.write('\x1b[B\r')
+          await retry(async () => {
+            expect(output).toContain('Ready in')
+          }, 10_000)
+
+          // The shell must regain its prompt while the Next process is stopped.
+          const beforeSuspend = output.length
+          shell.write('\x1a')
+          await retry(async () => {
+            expect(output.slice(beforeSuspend)).toContain('Stopped')
+            expect(output.slice(beforeSuspend)).toContain('UPGRADE_SHELL>')
+          }, 10_000)
+
+          // fg must resume the child PTY as well as the supervisor. A request
+          // log after fg proves the dev CLI can still write to the terminal.
+          shell.write('fg\r')
+          const afterResume = output.length
+          const response = await retry(
+            () => fetch(`http://127.0.0.1:${port}/`),
+            10_000
+          )
+          expect(response.status).toBe(200)
+          await retry(async () => {
+            expect(output.slice(afterResume)).toContain('UPGRADE_REQUEST_LOG')
+          }, 10_000)
+
+          shell.write('\x03')
+          await retry(async () => {
+            expect(output.slice(afterResume)).toContain('UPGRADE_SHELL>')
+          }, 10_000)
+        } finally {
+          if (!exited) {
+            shell.write('\x03')
+            shell.write('exit\r')
+            try {
+              await retry(async () => {
+                expect(exited).toBe(true)
+              }, 5_000)
+            } finally {
+              if (!exited) {
+                shell.kill()
+              }
+            }
+          }
+        }
+      })
+    }
 
     it('starts Upgrade now before shutdown finishes, then stops dev and its worker', async () => {
       // Keep the worker alive until the test releases its pending after().

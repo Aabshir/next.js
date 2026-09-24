@@ -207,6 +207,7 @@ export async function runDevWithUpgradePrompt(
     }
   }
   process.stdout.on('resize', onResize)
+  let onContinue: (() => void) | null = null
 
   // Close the spool after replay; remove listeners on upgrade or parent exit.
   let captureClosed = false
@@ -223,6 +224,9 @@ export async function runDevWithUpgradePrompt(
     process.off('SIGHUP', onHangup)
     process.stdout.off('resize', onResize)
     process.stdout.off('drain', onDrain)
+    if (onContinue) {
+      process.off('SIGCONT', onContinue)
+    }
     onData.dispose()
     closeCapture()
   }
@@ -333,12 +337,53 @@ export async function runDevWithUpgradePrompt(
   const wasRaw = process.stdin.isRaw ?? false
   process.stdin.setRawMode(true)
   process.stdin.resume()
-  const onInput = (data: Buffer) => terminal.write(data)
+  const onInput = (data: Buffer) => {
+    if (process.platform === 'win32') {
+      terminal.write(data)
+      return
+    }
+    const suspendAt = data.indexOf(0x1a)
+    if (suspendAt === -1) {
+      terminal.write(data)
+      return
+    }
+    if (suspendAt > 0) {
+      terminal.write(data.subarray(0, suspendAt))
+    }
+    // The nested PTY suspends its foreground job. Restore the outer terminal
+    // before suspending this foreground job so the shell regains control.
+    terminal.write('\x1a')
+    process.stdin.setRawMode(wasRaw)
+    process.stdin.pause()
+    process.kill(process.pid, 'SIGTSTP')
+    if (suspendAt + 1 < data.length) {
+      terminal.write(data.subarray(suspendAt + 1))
+    }
+  }
+  if (process.platform !== 'win32') {
+    onContinue = () => {
+      // forkpty creates a session led by terminal.pid. Resume the whole PTY
+      // foreground group after the shell brings the supervisor back with fg.
+      if (exitCode === null) {
+        try {
+          process.kill(-terminal.pid, 'SIGCONT')
+        } catch (error) {
+          console.warn(`Could not resume dev after fg: ${String(error)}`)
+        }
+      }
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+    }
+    process.on('SIGCONT', onContinue)
+  }
   process.stdin.on('data', onInput)
   terminal.onExit(({ exitCode: code }) => {
     process.stdin.off('data', onInput)
     process.stdin.setRawMode(wasRaw)
     process.stdin.pause()
+    if (onContinue) {
+      process.off('SIGCONT', onContinue)
+    }
     process.exitCode = childExitCode(code)
   })
   return true
