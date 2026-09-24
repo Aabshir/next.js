@@ -1,14 +1,28 @@
 import { existsSync, watch, writeFileSync } from 'fs'
 import { join } from 'path'
-import { after } from 'next/server'
+import { after, connection } from 'next/server'
+import { Suspense } from 'react'
 
-export const dynamic = 'force-dynamic'
-
-export default async function Page({
+export default function Page({
   searchParams,
 }: {
-  searchParams: Promise<{ hold: string | undefined }>
+  searchParams: Promise<Record<string, string | string[]>>
 }) {
+  // Cache Components builds need a boundary around runtime request data.
+  return (
+    <Suspense fallback={null}>
+      <RequestContent searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+async function RequestContent({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[]>>
+}) {
+  await connection()
+
   if ((await searchParams).hold === '1') {
     // Keep Next's real shutdown cleanup pending until the test releases it.
     after(
