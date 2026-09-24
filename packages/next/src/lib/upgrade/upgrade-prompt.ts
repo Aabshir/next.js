@@ -135,6 +135,7 @@ export async function runDevWithUpgradePrompt(
   let outputMode: 'capture' | 'replay' | 'live' = 'capture'
   const pending: Buffer[] = []
   let exitCode: number | null = null
+  let exitSignal: number | undefined
   let captureError: unknown = null
   const promptController = new AbortController()
   let terminationSignal: 'SIGTERM' | 'SIGHUP' | null = null
@@ -170,10 +171,15 @@ export async function runDevWithUpgradePrompt(
     }
   })
   // The dev process may finish before a choice; the menu still owns the parent.
-  const childExitCode = (code: number) =>
-    terminationSignal ? 128 + constants.signals[terminationSignal] : code
-  terminal.onExit(({ exitCode: code }) => {
+  const childExitCode = (code: number) => {
+    if (terminationSignal) {
+      return 128 + constants.signals[terminationSignal]
+    }
+    return exitSignal ? 128 + exitSignal : code
+  }
+  terminal.onExit(({ exitCode: code, signal }) => {
     exitCode = code
+    exitSignal = signal
     if (outputMode === 'live') {
       process.exitCode = childExitCode(code)
     }
