@@ -70,9 +70,9 @@ export function ErrorOverlay({
   const hasNormal = runtimeErrors.some(
     (e) => !isInstantNavigationError(e.error)
   )
-  const hasInstant =
-    state.upgradeAdvisory !== null ||
-    runtimeErrors.some((e) => isInstantNavigationError(e.error))
+  const hasInstant = runtimeErrors.some((e) =>
+    isInstantNavigationError(e.error)
+  )
   const tabKey = `${hasNormal ? 'n' : ''}${hasInstant ? 'i' : ''}`
 
   return (

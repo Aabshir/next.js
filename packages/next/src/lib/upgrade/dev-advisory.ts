@@ -28,6 +28,7 @@ export function createUpgradeAdvisory(
               prompt: advisory.unavailableReason
                 ? `Your version of Next.js is affected by a known security vulnerability.\n\n${advisory.unavailableReason}\n\nReference: ${advisory.reference}\n\nApp directory: ${JSON.stringify(directory)}`
                 : `Run \`next upgrade ${shellQuote.quote([directory])} --ai=${advisory.policy}\` and follow its instructions.`,
+              unavailableReason: advisory.unavailableReason,
             }
           }
           return advisory
