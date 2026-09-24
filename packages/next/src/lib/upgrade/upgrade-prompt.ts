@@ -136,6 +136,7 @@ export async function runDevWithUpgradePrompt(
   const pending: Buffer[] = []
   let exitCode: number | null = null
   let exitSignal: number | undefined
+  let menuInterrupted = false
   let captureError: unknown = null
   const promptController = new AbortController()
   let terminationSignal: 'SIGTERM' | 'SIGHUP' | null = null
@@ -174,6 +175,9 @@ export async function runDevWithUpgradePrompt(
   const childExitCode = (code: number) => {
     if (terminationSignal) {
       return 128 + constants.signals[terminationSignal]
+    }
+    if (menuInterrupted) {
+      return 130
     }
     return exitSignal ? 128 + exitSignal : code
   }
@@ -292,6 +296,7 @@ export async function runDevWithUpgradePrompt(
   // Respect a menu interrupt, or return the child's exit status if dev already
   // finished while the menu was open.
   if (action === 'interrupt') {
+    menuInterrupted = true
     if (exitCode === null) {
       terminal.write('\x03')
     }
