@@ -139,7 +139,7 @@ export async function runDevWithUpgradePrompt(
   // Capture output during the menu, queue new chunks during replay to preserve
   // their order, then forward output directly once the menu is gone.
   let capturedBytes = 0
-  let outputMode: 'capture' | 'replay' | 'live' = 'capture'
+  let outputMode: 'capture' | 'replay' | 'live' | 'discard' = 'capture'
   const pending: Buffer[] = []
   let exitCode: number | null = null
   let exitSignal: number | undefined
@@ -155,6 +155,9 @@ export async function runDevWithUpgradePrompt(
     }
   }
   const onData = terminal.onData((data) => {
+    if (outputMode === 'discard') {
+      return
+    }
     const bytes = Buffer.from(data)
     if (outputMode === 'live') {
       if (!process.stdout.write(bytes) && !waitingForDrain) {
@@ -202,7 +205,7 @@ export async function runDevWithUpgradePrompt(
   terminal.onExit(({ exitCode: code, signal }) => {
     exitCode = code
     exitSignal = signal
-    if (outputMode === 'live') {
+    if (outputMode === 'live' || outputMode === 'discard') {
       process.exitCode = childExitCode(code)
     }
   })
@@ -290,6 +293,20 @@ export async function runDevWithUpgradePrompt(
     return true
   }
 
+  // Ctrl+C in the menu stops dev promptly. Its hidden logs need not be
+  // replayed; only Skip promises a full replay.
+  if (action === 'interrupt') {
+    menuInterrupted = true
+    outputMode = 'discard'
+    closeCapture()
+    if (exitCode === null) {
+      terminal.write('\x03')
+    } else {
+      process.exitCode = childExitCode(exitCode)
+    }
+    return true
+  }
+
   // After a non-upgrade choice or prompt failure, restore captured output
   // before forwarding new output. Chunks arriving during replay go into pending.
   outputMode = 'replay'
@@ -329,12 +346,6 @@ export async function runDevWithUpgradePrompt(
 
   // Respect a menu interrupt, or return the child's exit status if dev already
   // finished while the menu was open.
-  if (action === 'interrupt') {
-    menuInterrupted = true
-    if (exitCode === null) {
-      terminal.write('\x03')
-    }
-  }
   if (exitCode !== null) {
     process.exitCode = childExitCode(exitCode)
     return true
