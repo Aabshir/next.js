@@ -11,6 +11,7 @@ import { join } from 'path'
 import type { IPty } from 'node-pty'
 import { PHASE_DEVELOPMENT_SERVER } from '../../shared/lib/constants'
 import { getProjectDir } from '../get-project-dir'
+import { getNodeDebugType, getParsedNodeOptions } from '../../server/lib/utils'
 
 /**
  * Keep the human upgrade menu separate from a running `next dev` terminal.
@@ -33,7 +34,9 @@ export async function runDevWithUpgradePrompt(
     return false
   }
   // A PTY combines stdout and stderr, so preserve redirected error output.
-  if (!process.stderr.isTTY) {
+  // Likewise, relaunching under the same inspector options would collide with
+  // the debugger already attached to this process.
+  if (!process.stderr.isTTY || getNodeDebugType(getParsedNodeOptions())) {
     return false
   }
 
