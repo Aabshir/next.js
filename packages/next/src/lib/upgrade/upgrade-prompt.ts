@@ -32,6 +32,10 @@ export async function runDevWithUpgradePrompt(
   if (process.env.NEXT_PRIVATE_UPGRADE_SUPERVISED === '1') {
     return false
   }
+  // A PTY combines stdout and stderr, so preserve redirected error output.
+  if (!process.stderr.isTTY) {
+    return false
+  }
 
   // Check basic eligibility before starting a PTY. The full offer assessment
   // runs later so it cannot delay dev startup; config supplies the policy.
