@@ -13,6 +13,8 @@ import { PHASE_DEVELOPMENT_SERVER } from '../../shared/lib/constants'
 import { getProjectDir } from '../get-project-dir'
 import { getNodeDebugType, getParsedNodeOptions } from '../../server/lib/utils'
 
+const MAX_CAPTURE_BYTES = 64 * 1024 * 1024
+
 /**
  * Keep the human upgrade menu separate from a running `next dev` terminal.
  *
@@ -145,6 +147,7 @@ export async function runDevWithUpgradePrompt(
   let exitSignal: number | undefined
   let menuInterrupted = false
   let captureError: unknown = null
+  let captureLimitReached = false
   let humanPromptStarted = false
   const promptController = new AbortController()
   let terminationSignal: 'SIGINT' | 'SIGTERM' | 'SIGHUP' | null = null
@@ -194,6 +197,13 @@ export async function runDevWithUpgradePrompt(
           }
           offset += written
           capturedBytes += written
+        }
+        if (capturedBytes >= MAX_CAPTURE_BYTES) {
+          captureLimitReached = true
+          // Pause only during the exceptional handoff, keeping the spool
+          // bounded until the menu closes and replay can drain it.
+          terminal.pause()
+          promptController.abort()
         }
       } catch (error) {
         captureError = error
@@ -307,6 +317,11 @@ export async function runDevWithUpgradePrompt(
   if (captureError) {
     process.stderr.write(
       `Could not capture dev output: ${String(captureError)}\n`
+    )
+  }
+  if (captureLimitReached) {
+    process.stderr.write(
+      'Upgrade prompt closed because dev output exceeded 64 MiB. Continuing dev.\n'
     )
   }
 
