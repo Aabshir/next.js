@@ -1,4 +1,4 @@
-import { existsSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { createRequire } from 'module'
 import { join } from 'path'
 import resolveFrom from 'resolve-from'
@@ -191,6 +191,48 @@ describe('agent upgrade prompt', () => {
           }
         }
       )
+    })
+
+    it('removes app env values from the prompt supervisor after preflight', async () => {
+      const resultPath = join(next.testDir, 'upgrade-preflight-env-result')
+      try {
+        await next.patchFile(
+          '.env',
+          'UPGRADE_PREFLIGHT_ENV_TEST=fixture-only\n',
+          async () => {
+            await next.patchFile(
+              'next.config.js',
+              `if (!process.env.NEXT_PRIVATE_UPGRADE_SUPERVISED) {
+  process.on('exit', () => {
+    require('fs').writeFileSync(${JSON.stringify(resultPath)}, process.env.UPGRADE_PREFLIGHT_ENV_TEST || '')
+  })
+}
+module.exports = { experimental: { agenticAutoUpgrade: 'future' } }
+`,
+              async () => {
+                const dev = await startDev()
+                try {
+                  await retry(async () => {
+                    expect(dev.output).toContain('Upgrade now')
+                  }, 10_000)
+
+                  // The config's exit hook observes the supervisor process.
+                  // The PTY child has a separate environment and skips it.
+                  dev.terminal.write('\x03')
+                  await retry(async () => {
+                    expect(dev.exited).toBe(true)
+                    expect(readFileSync(resultPath, 'utf8')).toBe('')
+                  }, 10_000)
+                } finally {
+                  await dev.stop(false)
+                }
+              }
+            )
+          }
+        )
+      } finally {
+        rmSync(resultPath, { force: true })
+      }
     })
 
     it('stops dev and its worker when the outer CLI receives SIGTERM', async () => {

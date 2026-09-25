@@ -9,6 +9,7 @@ import {
 import { constants, tmpdir } from 'os'
 import { join } from 'path'
 import type { IPty } from 'node-pty'
+import { initialEnv, updateInitialEnv } from '@next/env'
 import { PHASE_DEVELOPMENT_SERVER } from '../../shared/lib/constants'
 import { getProjectDir } from '../get-project-dir'
 import { getNodeDebugType, getParsedNodeOptions } from '../../server/lib/utils'
@@ -49,6 +50,23 @@ export async function runDevWithUpgradePrompt(
   // Config loading reads .env into this process. Keep the original environment
   // so the child can reload .env values when the file changes.
   const childEnv = { ...process.env }
+  const restoreEnv = () => {
+    // Config can also change @next/env's baseline, which later resetEnv() uses.
+    const originalEnv = { ...childEnv }
+    for (const key of Object.keys(initialEnv ?? {})) {
+      if (!(key in childEnv)) {
+        originalEnv[key] = undefined
+      }
+    }
+    updateInitialEnv(originalEnv)
+
+    for (const key of Object.keys(process.env)) {
+      if (!(key in childEnv)) {
+        delete process.env[key]
+      }
+    }
+    Object.assign(process.env, childEnv)
+  }
   // Preflight must never replace ordinary dev's config error path. Let nextDev
   // load and report an invalid config in the usual way.
   let preflight: {
@@ -72,9 +90,16 @@ export async function runDevWithUpgradePrompt(
       require('../../server/config') as typeof import('../../server/config')
     ).default
     // TODO: Reuse this config in dev rather than loading it again in the child.
-    const config = await loadConfig(PHASE_DEVELOPMENT_SERVER, dir, {
-      silent: true,
-    })
+    let config: Awaited<ReturnType<typeof loadConfig>>
+    try {
+      config = await loadConfig(PHASE_DEVELOPMENT_SERVER, dir, {
+        silent: true,
+      })
+    } finally {
+      // Only the dev child should inherit the app's .env values. The parent
+      // may later spawn a package manager or coding agent for Upgrade now.
+      restoreEnv()
+    }
     preflight = {
       dir,
       context: getUpgradeContext(config),
