@@ -58,7 +58,7 @@ export async function runDevWithUpgradePrompt(
     if (!(await shouldPromptForUpgrade())) {
       return false
     }
-    const dir = getProjectDir(directory)
+    const dir = getProjectDir(process.env.NEXT_PRIVATE_DEV_DIR || directory)
     const loadConfig = (
       require('../../server/config') as typeof import('../../server/config')
     ).default
