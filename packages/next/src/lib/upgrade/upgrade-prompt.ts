@@ -146,7 +146,8 @@ export async function runDevWithUpgradePrompt(
   let menuInterrupted = false
   let captureError: unknown = null
   const promptController = new AbortController()
-  let terminationSignal: 'SIGTERM' | 'SIGHUP' | null = null
+  let terminationSignal: 'SIGINT' | 'SIGTERM' | 'SIGHUP' | null = null
+  let restoreInput: (() => void) | null = null
   let waitingForDrain = false
   const onDrain = () => {
     waitingForDrain = false
@@ -230,6 +231,7 @@ export async function runDevWithUpgradePrompt(
     rmSync(captureDir, { recursive: true, force: true })
   }
   const cleanup = () => {
+    process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onTerminate)
     process.off('SIGHUP', onHangup)
     process.stdout.off('resize', onResize)
@@ -242,18 +244,25 @@ export async function runDevWithUpgradePrompt(
   }
   // Parent signals must reach the dev CLI, which owns its server worker. Keep
   // the parent alive until that child completes its normal shutdown.
-  const terminate = (signal: 'SIGTERM' | 'SIGHUP') => {
+  const terminate = (signal: 'SIGINT' | 'SIGTERM' | 'SIGHUP') => {
     if (terminationSignal) {
       return
     }
     terminationSignal = signal
+    restoreInput?.()
     promptController.abort()
     if (exitCode === null) {
-      terminal.kill(signal)
+      if (signal === 'SIGINT') {
+        terminal.write('\x03')
+      } else {
+        terminal.kill(signal)
+      }
     }
   }
+  const onInterrupt = () => terminate('SIGINT')
   const onTerminate = () => terminate('SIGTERM')
   const onHangup = () => terminate('SIGHUP')
+  process.on('SIGINT', onInterrupt)
   process.on('SIGTERM', onTerminate)
   process.on('SIGHUP', onHangup)
   const onExit = () => cleanup()
@@ -353,6 +362,10 @@ export async function runDevWithUpgradePrompt(
 
   // Once the menu is gone, forward terminal input to the still-running dev CLI.
   const wasRaw = process.stdin.isRaw ?? false
+  restoreInput = () => {
+    process.stdin.setRawMode(wasRaw)
+    process.stdin.pause()
+  }
   process.stdin.setRawMode(true)
   process.stdin.resume()
   const onInput = (data: Buffer) => {
@@ -371,8 +384,7 @@ export async function runDevWithUpgradePrompt(
     // The nested PTY suspends its foreground job. Restore the outer terminal
     // before suspending this foreground job so the shell regains control.
     terminal.write('\x1a')
-    process.stdin.setRawMode(wasRaw)
-    process.stdin.pause()
+    restoreInput()
     process.kill(process.pid, 'SIGTSTP')
     if (suspendAt + 1 < data.length) {
       terminal.write(data.subarray(suspendAt + 1))
@@ -397,8 +409,7 @@ export async function runDevWithUpgradePrompt(
   process.stdin.on('data', onInput)
   terminal.onExit(({ exitCode: code }) => {
     process.stdin.off('data', onInput)
-    process.stdin.setRawMode(wasRaw)
-    process.stdin.pause()
+    restoreInput()
     if (onContinue) {
       process.off('SIGCONT', onContinue)
     }

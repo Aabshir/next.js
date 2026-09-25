@@ -308,6 +308,25 @@ describe('agent upgrade prompt', () => {
       }
     })
 
+    it('returns 130 when SIGINT is sent directly to the outer CLI', async () => {
+      const dev = await startDev()
+      try {
+        await retry(async () => {
+          expect(dev.output).toContain('Upgrade now')
+        }, 10_000)
+
+        // IDEs and task runners can signal the supervisor PID directly,
+        // instead of sending the Ctrl+C byte through the terminal.
+        process.kill(dev.terminal.pid, 'SIGINT')
+        await retry(async () => {
+          expect(dev.exited).toBe(true)
+        }, 10_000)
+        expect(dev.exitCode).toBe(130)
+      } finally {
+        await dev.stop(false)
+      }
+    })
+
     it('replays large captured logs with a slow terminal reader', async () => {
       const dev = await startDev()
       try {
