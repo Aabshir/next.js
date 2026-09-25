@@ -67,12 +67,14 @@ describe('agent upgrade prompt', () => {
       let output = ''
       let exited = false
       let exitCode: number | undefined
+      let exitSignal: number | undefined
       terminal.onData((data: string) => {
         output += data
       })
-      terminal.onExit(({ exitCode: code }) => {
+      terminal.onExit(({ exitCode: code, signal }) => {
         exited = true
         exitCode = code
+        exitSignal = signal
       })
 
       return {
@@ -86,6 +88,10 @@ describe('agent upgrade prompt', () => {
         },
         get exitCode() {
           return exitCode
+        },
+        // node-pty reports a signal separately; convert it to shell status.
+        get exitStatus() {
+          return exitSignal ? 128 + exitSignal : exitCode
         },
         async stop(skipPrompt: boolean = true) {
           if (!exited) {
@@ -363,7 +369,7 @@ module.exports = { experimental: { agenticAutoUpgrade: 'future' } }
         await retry(async () => {
           expect(dev.exited).toBe(true)
         }, 10_000)
-        expect(dev.exitCode).toBe(130)
+        expect(dev.exitStatus).toBe(130)
       } finally {
         await dev.stop(false)
       }
@@ -401,6 +407,52 @@ module.exports = { experimental: { agenticAutoUpgrade: 'future' } }
         dev.terminal.resume()
         await dev.stop()
       }
+    })
+
+    it('terminates when the terminal stops reading during replay', async () => {
+      // Emit output from the real PTY child without relying on a page request.
+      await next.patchFile(
+        'next.config.js',
+        `if (process.env.NEXT_PRIVATE_UPGRADE_SUPERVISED) {
+  console.log('UPGRADE_REPLAY_FLOOD_BEGIN' + 'x'.repeat(1024 * 1024) + 'UPGRADE_REPLAY_FLOOD_END')
+}
+module.exports = { experimental: { agenticAutoUpgrade: 'future' } }
+`,
+        async () => {
+          const dev = await startDev()
+          try {
+            await retry(async () => {
+              expect(dev.output).toContain('Upgrade now')
+            }, 10_000)
+
+            // Pause at the prompt's screen exit, before the captured log can
+            // finish replaying. This also ensures Skip was handled before the
+            // signal, rather than racing the prompt's own cleanup.
+            const replayStarted = new Promise<void>((resolve) => {
+              const listener = dev.terminal.onData((data: string) => {
+                if (data.includes('\x1b[?1049l')) {
+                  dev.terminal.pause()
+                  listener.dispose()
+                  resolve()
+                }
+              })
+            })
+            dev.terminal.write('\x1b[B\r')
+            await replayStarted
+            expect(dev.output).not.toContain('UPGRADE_REPLAY_FLOOD_END')
+
+            // SIGTERM must end the supervisor even if stdout never drains.
+            process.kill(dev.terminal.pid, 'SIGTERM')
+            await retry(async () => {
+              expect(dev.exited).toBe(true)
+            }, 5_000)
+            expect(dev.exitStatus).toBe(143)
+          } finally {
+            dev.terminal.resume()
+            await dev.stop(false)
+          }
+        }
+      )
     })
 
     if (process.platform !== 'win32') {

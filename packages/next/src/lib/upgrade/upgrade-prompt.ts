@@ -4,6 +4,7 @@ import {
   openSync,
   readSync,
   rmSync,
+  write,
   writeSync,
 } from 'fs'
 import { constants, tmpdir } from 'os'
@@ -175,6 +176,7 @@ export async function runDevWithUpgradePrompt(
   let captureLimitReached = false
   let humanPromptStarted = false
   const promptController = new AbortController()
+  const terminationController = new AbortController()
   let terminationSignal: 'SIGINT' | 'SIGTERM' | 'SIGHUP' | null = null
   let restoreInput: (() => void) | null = null
   let resolveChildExit: (() => void) | null = null
@@ -296,6 +298,11 @@ export async function runDevWithUpgradePrompt(
     }
     terminationSignal = signal
     restoreInput?.()
+    // If replay paused PTY reads, let the child drain its terminal while its
+    // shutdown signal is handled. Its output no longer belongs on our screen.
+    outputMode = 'discard'
+    terminal.resume()
+    terminationController.abort()
     promptController.abort()
     if (exitCode === null) {
       if (signal === 'SIGINT') {
@@ -313,6 +320,19 @@ export async function runDevWithUpgradePrompt(
   process.on('SIGHUP', onHangup)
   const onExit = () => cleanup()
   process.once('exit', onExit)
+  const finishTermination = async () => {
+    outputMode = 'discard'
+    await childExited
+    cleanup()
+    process.off('exit', onExit)
+    // Exit with the original signal after the child has stopped. This avoids
+    // waiting on a blocked terminal write in another process exit listener.
+    if (terminationSignal && process.platform !== 'win32') {
+      process.kill(process.pid, terminationSignal)
+    } else {
+      process.exit(childExitCode(exitCode ?? 0))
+    }
+  }
 
   // The prompt runs in the parent while the PTY child can serve requests.
   let action: Awaited<ReturnType<typeof nudgeUpgrade>> = undefined
@@ -353,12 +373,7 @@ export async function runDevWithUpgradePrompt(
   // A process-manager signal owns shutdown. The assessment may still have a
   // pending request, but it must not delay the child's exit or our own cleanup.
   if (terminationSignal) {
-    await childExited
-    cleanup()
-    process.off('exit', onExit)
-    // An aborted metadata request may still have an open socket. The child
-    // has already exited, so it must not hold the invoking CLI open.
-    process.exit(childExitCode(exitCode ?? 0))
+    await finishTermination()
   }
 
   // Start the upgrade as soon as it is chosen; shutdown is requested but is
@@ -401,16 +416,43 @@ export async function runDevWithUpgradePrompt(
   // Stop PTY reads while replaying so pending output remains bounded and every
   // byte reaches stdout in the same order, even when its reader is slow.
   terminal.pause()
-  const writeOutput = async (bytes: Buffer) => {
-    if (!process.stdout.write(bytes)) {
-      await new Promise<void>((resolve) =>
-        process.stdout.once('drain', resolve)
-      )
+  const writeOutput = async (bytes: Buffer): Promise<boolean> => {
+    let offset = 0
+    while (offset < bytes.length && !terminationSignal) {
+      const start = offset
+      // TTY stdout writes are synchronous on POSIX. Use the async fd API so a
+      // stopped terminal reader cannot block the signal handler itself.
+      const written = await new Promise<number>((resolve, reject) => {
+        const onAbort = () => resolve(0)
+        terminationController.signal.addEventListener('abort', onAbort, {
+          once: true,
+        })
+        write(
+          process.stdout.fd,
+          bytes,
+          start,
+          bytes.length - start,
+          null,
+          (error, count) => {
+            terminationController.signal.removeEventListener('abort', onAbort)
+            if (error) {
+              reject(error)
+            } else {
+              resolve(count)
+            }
+          }
+        )
+      })
+      if (written === 0) {
+        return false
+      }
+      offset += written
     }
+    return !terminationSignal
   }
   const buffer = Buffer.allocUnsafe(64 * 1024)
   let position = 0
-  while (position < capturedBytes) {
+  while (position < capturedBytes && !terminationSignal) {
     const length = readSync(
       capture,
       buffer,
@@ -421,11 +463,18 @@ export async function runDevWithUpgradePrompt(
     if (length === 0) {
       break
     }
-    await writeOutput(buffer.subarray(0, length))
+    if (!(await writeOutput(buffer.subarray(0, length)))) {
+      break
+    }
     position += length
   }
   for (const data of pending) {
-    await writeOutput(data)
+    if (!(await writeOutput(data))) {
+      break
+    }
+  }
+  if (terminationSignal) {
+    await finishTermination()
   }
   pending.length = 0
   outputMode = 'live'
