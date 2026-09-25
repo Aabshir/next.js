@@ -631,6 +631,32 @@ impl DiskFileSystem {
         })
     }
 
+    /// Equivalent to [`DiskFileSystem::try_from_sys_path`], but allows resolving paths that cross
+    /// roots and may be in a different [`DiskFileSystem`] linked via the [`DiskFileSystemMap`].
+    pub async fn try_from_sys_path_across_roots(
+        &self,
+        vc_self: ResolvedVc<DiskFileSystem>,
+        sys_path: &Path,
+        relative_to: &FileSystemPath,
+    ) -> Result<Option<FileSystemPath>> {
+        debug_assert_eq!(
+            relative_to.fs,
+            ResolvedVc::upcast(vc_self),
+            "`relative_to` must be in the current disk filesystem"
+        );
+
+        if let Some(path) = self.try_from_sys_path(vc_self, sys_path, Some(relative_to)) {
+            return Ok(Some(path));
+        }
+
+        let absolute_path = self
+            .to_sys_path_raw(relative_to)
+            .join(sys_path)
+            .normalize_lexically()?;
+        self.lookup_in_file_system_map(vc_self, &absolute_path)
+            .await
+    }
+
     /// Returns the path as a system [`PathBuf`]. Similar to [`DiskFileSystem::to_sys_path`], but
     /// keeps the internal representation as-is.
     ///
