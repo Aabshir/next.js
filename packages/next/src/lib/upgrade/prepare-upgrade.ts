@@ -119,8 +119,7 @@ export async function getUpgradeAssessment(
       reference: null,
       upgrade: {
         status: 'blocked',
-        reason:
-          'Security upgrades are not supported for canary versions of Next.js. Use --ai=latest or --ai=future to upgrade on the canary channel.',
+        reason: `The installed Next.js version (${installedVersion}) is a canary release. Security advisories target stable versions, and canary versions do not reliably follow stable version ordering, so an advisory could be a false positive. To upgrade to the latest canary release, run:\n\nnpx next@canary upgrade --ai=latest`,
       },
     }
   }
