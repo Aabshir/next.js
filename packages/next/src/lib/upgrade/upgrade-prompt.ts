@@ -145,9 +145,19 @@ export async function runDevWithUpgradePrompt(
   let exitSignal: number | undefined
   let menuInterrupted = false
   let captureError: unknown = null
+  let humanPromptStarted = false
   const promptController = new AbortController()
   let terminationSignal: 'SIGINT' | 'SIGTERM' | 'SIGHUP' | null = null
   let restoreInput: (() => void) | null = null
+  let resolveChildExit: (() => void) | null = null
+  const childExited = new Promise<void>((resolve) => {
+    resolveChildExit = resolve
+  })
+  const promptAborted = new Promise<void>((resolve) => {
+    promptController.signal.addEventListener('abort', () => resolve(), {
+      once: true,
+    })
+  })
   let waitingForDrain = false
   const onDrain = () => {
     waitingForDrain = false
@@ -206,6 +216,7 @@ export async function runDevWithUpgradePrompt(
   terminal.onExit(({ exitCode: code, signal }) => {
     exitCode = code
     exitSignal = signal
+    resolveChildExit?.()
     if (outputMode === 'live' || outputMode === 'discard') {
       process.exitCode = childExitCode(code)
     }
@@ -271,7 +282,24 @@ export async function runDevWithUpgradePrompt(
   // The prompt runs in the parent while the PTY child can serve requests.
   let action: Awaited<ReturnType<typeof nudgeUpgrade>> = undefined
   try {
-    action = await nudgeUpgrade(dir, context, 'dev', promptController.signal)
+    const assessment = nudgeUpgrade(
+      dir,
+      context,
+      'dev',
+      promptController.signal,
+      () => {
+        humanPromptStarted = true
+      }
+    )
+    action = await Promise.race([
+      assessment,
+      promptAborted.then(() => undefined),
+    ])
+    // If the menu was on screen, wait for its own finally block to restore
+    // the terminal before printing a diagnostic or replaying dev output.
+    if (humanPromptStarted && promptController.signal.aborted) {
+      await assessment
+    }
   } catch (error) {
     process.stderr.write(`Could not offer the upgrade: ${String(error)}\n`)
   }
@@ -280,6 +308,17 @@ export async function runDevWithUpgradePrompt(
     process.stderr.write(
       `Could not capture dev output: ${String(captureError)}\n`
     )
+  }
+
+  // A process-manager signal owns shutdown. The assessment may still have a
+  // pending request, but it must not delay the child's exit or our own cleanup.
+  if (terminationSignal) {
+    await childExited
+    cleanup()
+    process.off('exit', onExit)
+    // An aborted metadata request may still have an open socket. The child
+    // has already exited, so it must not hold the invoking CLI open.
+    process.exit(childExitCode(exitCode ?? 0))
   }
 
   // Start the upgrade as soon as it is chosen; shutdown is requested but is
